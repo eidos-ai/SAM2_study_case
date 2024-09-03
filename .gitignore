@@ -8,3 +8,6 @@ build/*
 _C.*
 outputs/*
 checkpoints/*.pt
+**/.ipynb_checkpoints/
+*.mp4
+*.pt
