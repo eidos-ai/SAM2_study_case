@@ -11,3 +11,4 @@ checkpoints/*.pt
 **/.ipynb_checkpoints/
 *.mp4
 *.pt
+tvcalib/tmp/
