@@ -13,6 +13,7 @@ import pandas as pd
 from PIL import Image
 from tqdm import tqdm
 from matplotlib.lines import Line2D
+from matplotlib.patches import Polygon, Circle
 from collections import defaultdict
 from argparse import Namespace
 from functools import partial
@@ -214,6 +215,23 @@ for index, sample in tqdm(df.iterrows(), total=df.shape[0], desc="Iteration"):
             linewidth=5,
         )
         ax.add_line(line2d)
+
+    point_center_test_circle = [10, -10] # x,y coords of the circle center
+    theta = np.linspace(0, 2 * np.pi, 300)
+    radius = 1
+    circle_points = np.array([[point_center_test_circle[0] + radius * np.cos(t), point_center_test_circle[1] + radius * np.sin(t), 0] for t in theta])
+    test_circle = torch.Tensor(circle_points)
+    with torch.no_grad():
+        points_px = cam.project_point2pixel(test_circle, lens_distortion=False).cpu()[0, 0]
+        circle2d = Polygon(
+            points_px[:, :2],
+            closed=True,
+            color="black",
+            fill=False,
+            alpha=0.5,
+            linewidth=5,
+        )
+        ax.add_patch(circle2d)
 
     ax = viz.draw_selected_points(
         ax,
