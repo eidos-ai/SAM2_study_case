@@ -32,6 +32,18 @@ from tvcalib.inference import InferenceDatasetCalibration, InferenceDatasetSegme
 from tvcalib.inference import get_camera_from_per_sample_output
 from tvcalib.utils import visualization_mpl_min as viz
 
+
+def get_bbox_pitch_homography(homography, bbox_bottom_middle: list[int]):
+    try:
+        hinv = np.linalg.inv(homography)
+        print("hinv:\n", hinv)
+        bm = np.array(bbox_bottom_middle) # bbox_bottom_middle = [pixel_x, pixel_y, 5]
+        bird_lower_middle = hinv @ bm        
+        bird_lower_middle /= bird_lower_middle[2]
+        return {"x": bird_lower_middle[0], "y": bird_lower_middle[1]}
+    except np.linalg.LinAlgError:
+        print("Error en operación algebráica")
+
 def process_video(video_path):
     args = Namespace(
         video_path=Path(video_path),
@@ -168,10 +180,84 @@ def process_video(video_path):
 
     for index, sample in tqdm(df.iterrows(), total=df.shape[0], desc="Iteration"):
         image_id = Path(sample.image_id).stem
-        if "checkpoint" in sample.image_id:
+        if "checkpoint" in image_id:
             continue
+
+        if "0001" not in image_id:
+            continue
+
         image = Image.open(args.images_path / sample.image_id).convert("RGB")
         image = T.functional.to_tensor(image)
+        h = torch.tensor(sample["homography"])
+
+        target_scale = 5
+        S = torch.eye(3).unsqueeze(0)
+        S[:, 0, 0] = S[:, 1, 1] = target_scale
+        # translate center of the homography matrix to the correct image origin (upper left)
+        T_adjusted = torch.eye(3).unsqueeze(0)
+        T_adjusted[:, 0, -1] = 105 / 2
+        T_adjusted[:, 1, -1] = 68 / 2
+
+        def _warp_img(image, H):
+            # scaling matrix for better image resolution
+            warped_top = kornia.geometry.transform.homography_warp(
+                image.unsqueeze(0),
+                S @ T_adjusted @ H,
+                dsize=(int(68 * target_scale), int(105 * target_scale)),
+                normalized_homography=False,
+                normalized_coordinates=False,
+                mode="nearest",
+            ).squeeze()
+            return warped_top
+
+        mask = _warp_img(image, h)
+        mask = torch.permute(mask, (1, 2, 0))
+        mask = (mask * 255).to(torch.uint8)
+        mask = 255 - mask
+    
+        # overlay with template
+        ftemplate = Path("template_pitch_t.png") 
+        template = T.functional.to_tensor(Image.open(ftemplate).convert("RGB"))
+        template = T.functional.resize(template, (int(target_scale*68), int(target_scale*105)))
+        template = torch.permute(template, (1, 2, 0))
+        template = (template * 255).to(torch.uint8)
+        
+        background = Image.fromarray(template.numpy())
+        foreground = Image.fromarray(mask.numpy())
+        blended = Image.blend(background, foreground, alpha=0.5)
+        # blended.save("tmp/blended_image.jpg", "JPEG")
+        
+        pixel = [841, 433]
+        pixels_raw_tensor = torch.tensor(pixel, dtype=torch.float32)
+        pixels = pixels_raw_tensor.view(1, 2)
+        
+        points_image = kornia.geometry.conversions.convert_points_to_homogeneous(pixels) # (?, 3)
+        points_image = points_image.transpose(0, 1) # (3, ?)
+
+        h_img2img = (S @ T_adjusted @ h).squeeze(0)
+        projected_points = h_img2img @ points_image
+        projected_points = projected_points / (projected_points[-1] + 1e-8)
+        
+        def pixel_to_field_coords(pixel_coords, img_width, img_height):
+            x_scale = 105 / img_width
+            y_scale = 68 / img_height
+            x_meters = pixel_coords[0] * x_scale
+            y_meters = pixel_coords[1] * y_scale
+            x_field = (x_meters - (105 / 2)).numpy()
+            y_field = (y_meters - (68 / 2)).numpy()
+            return [round(x_field[0], 2), round(y_field[0], 2)]
+        
+        world_coords = pixel_to_field_coords(projected_points, blended.size[0], blended.size[1])
+        print("world coords:\n", world_coords)
+        
+        # plot blended image
+        # plt.imshow(blended)
+        # plt.scatter(projected_points[0], projected_points[1])
+        # delta_m = 25
+        # plt.xlim(0-delta_m, 105*target_scale+delta_m)
+        # plt.ylim(0-delta_m, 68*target_scale+delta_m)
+        # plt.gca().invert_yaxis() # 'image-style' coordinate system (upper left origin)
+        # plt.savefig('imagen_con_puntos.png', bbox_inches='tight', pad_inches=0)
 
         cam = get_camera_from_per_sample_output(sample, args.lens_dist)
         points_line, points_circle = sample["points_line"], sample["points_circle"]
