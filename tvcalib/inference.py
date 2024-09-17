@@ -1,10 +1,6 @@
-import random
-import json
 import cv2
-import shutil
 import kornia
 import torch
-import matplotlib
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
@@ -12,10 +8,8 @@ import torchvision.transforms as T
 import pandas as pd
 from PIL import Image
 from tqdm import tqdm
-from matplotlib.lines import Line2D
-from matplotlib.patches import Polygon, Circle
+from matplotlib.patches import Polygon
 from collections import defaultdict
-from argparse import Namespace
 from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
@@ -24,7 +18,7 @@ from tvcalib.cam_modules import SNProjectiveCamera
 from tvcalib.module import TVCalibModule
 from tvcalib.cam_distr.tv_main_center import get_cam_distr, get_dist_distr
 from sn_segmentation.src.custom_extremities import generate_class_synthesis, get_line_extremities
-from tvcalib.sncalib_dataset import custom_list_collate, split_circle_central
+from tvcalib.sncalib_dataset import custom_list_collate
 from tvcalib.utils.io import detach_dict, tensor2list
 from tvcalib.utils.objects_3d import SoccerPitchLineCircleSegments, SoccerPitchSNCircleCentralSplit
 from tvcalib.inference import InferenceDatasetCalibration, InferenceDatasetSegmentation, InferenceSegmentationModel
@@ -168,7 +162,7 @@ class VideoCalibration:
         df = df.explode(column=[k for k, v in per_sample_output.items() if isinstance(v, list)])
         df.set_index("image_id", inplace=True, drop=False)
         self.df = df
-    
+
     def get_world_coordinates(self, image_id: str, pixel: list[int]):
         image = Image.open(self.images_path / image_id).convert("RGB")
         image = T.functional.to_tensor(image)
@@ -195,7 +189,7 @@ class VideoCalibration:
         mask = torch.permute(mask, (1, 2, 0))
         mask = (mask * 255).to(torch.uint8)
         mask = 255 - mask
-        
+
         ftemplate = Path("template_pitch_t.png") 
         template = T.functional.to_tensor(Image.open(ftemplate).convert("RGB"))
         template = T.functional.resize(template, (int(self.target_scale*self.field_width), int(self.target_scale*self.field_height)))
@@ -302,5 +296,5 @@ if __name__ == "__main__":
     video_calibration.segment_frames()
     video_calibration.calibrate_camera()
     coords = video_calibration.get_world_coordinates(image_id="0001.jpg", pixel=[841, 697])
-    video_calibration.draw_player_location(image_id="0001.jpg", coords)
+    video_calibration.draw_player_location(image_id="0001.jpg", world_coords=coords)
     video_calibration.generate_video()
