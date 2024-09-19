@@ -1,4 +1,5 @@
 import cv2
+import json
 import kornia
 import torch
 import argparse
@@ -12,6 +13,7 @@ from matplotlib.patches import Polygon
 from collections import defaultdict
 from functools import partial
 from multiprocessing import Pool
+from dataclasses import dataclass
 from pathlib import Path
 from SoccerNet.Evaluation.utils_calibration import SoccerPitch
 from tvcalib.cam_modules import SNProjectiveCamera
@@ -24,6 +26,12 @@ from tvcalib.utils.objects_3d import SoccerPitchLineCircleSegments, SoccerPitchS
 from tvcalib.inference import InferenceDatasetCalibration, InferenceDatasetSegmentation, InferenceSegmentationModel
 from tvcalib.inference import get_camera_from_per_sample_output
 from tvcalib.utils import visualization_mpl_min as viz
+
+
+@dataclass
+class WorldCoords:
+    x: float
+    y: float
 
 
 class VideoCalibration:
@@ -49,14 +57,14 @@ class VideoCalibration:
         self.target_scale = 5
 
 
-    def pixel_to_field_coords(self, pixel_coords, img_width, img_height):
+    def pixel_to_world_coords(self, pixel_coords, img_width, img_height):
         x_scale = self.field_height / img_width
         y_scale = self.field_width / img_height
         x_meters = pixel_coords[0] * x_scale
         y_meters = pixel_coords[1] * y_scale
         x_field = (x_meters - (self.field_height / 2)).numpy()
         y_field = (y_meters - (self.field_width / 2)).numpy()
-        return [round(x_field[0], 2), round(y_field[0], 2)]
+        return WorldCoords(x=round(x_field[0], 2), y=round(y_field[0], 2))
 
     def extract_frames(self):
         self.images_path.mkdir(parents=True, exist_ok=True)
@@ -163,6 +171,22 @@ class VideoCalibration:
         df.set_index("image_id", inplace=True, drop=False)
         self.df = df
 
+        dict_list = []
+        for _, row in self.df.iterrows():
+            row_dict = row.to_dict()
+            for key, value in row_dict.items():
+                if isinstance(value, torch.Tensor):
+                    row_dict[key] = value.numpy().tolist()
+                elif isinstance(value, np.ndarray):
+                    row_dict[key] = value.tolist()
+            image_id = row_dict.pop("image_id")
+            if "checkpoint" in image_id:
+                continue
+            dict_list.append({image_id: row_dict})
+
+        with open(f"{self.output_dir}/metadata.json", 'w') as json_file:
+            json.dump(dict_list, json_file, indent=4)
+
     def get_world_coordinates(self, image_id: str, pixel: list[int]):
         image = Image.open(self.images_path / image_id).convert("RGB")
         image = T.functional.to_tensor(image)
@@ -206,7 +230,7 @@ class VideoCalibration:
         h_img2img = (S @ T_adjusted @ h).squeeze(0)
         projected_points = h_img2img @ points_image
         projected_points = projected_points / (projected_points[-1] + 1e-8)
-        world_coords = self.pixel_to_field_coords(projected_points, blended.size[0], blended.size[1])
+        world_coords = self.pixel_to_world_coords(projected_points, blended.size[0], blended.size[1])
         return world_coords
 
     def draw_player_location(self, image_id, world_coords):
@@ -236,7 +260,7 @@ class VideoCalibration:
         ax = viz.draw_reprojection(ax, self.object3dcpu, cam)
 
         theta = np.linspace(0, 2 * np.pi, 300)
-        circle_points = np.array([[world_coords[0] + self.radius * np.cos(t), world_coords[1] + self.radius * np.sin(t), 0] for t in theta])
+        circle_points = np.array([[world_coords.x + self.radius * np.cos(t), world_coords.y + self.radius * np.sin(t), 0] for t in theta])
         test_circle = torch.Tensor(circle_points)
         with torch.no_grad():
             points_px = cam.project_point2pixel(test_circle, lens_distortion=False).cpu()[0, 0]
