@@ -18,14 +18,17 @@ from utils import extract_video_frames
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CHECKPOINT = "../checkpoints/sam2_hiera_large.pt"
 CONFIG = "sam2_hiera_l.yaml"
+IMAGE_HEIGHT = 1920
 
 logger = logging.getLogger(__name__)
 
 
 def configure_logger(verbosity: int) -> None:
-    log_level = logging.INFO  # Default to ERROR level
+    log_level = logging.INFO  # Default to INFO level
     if verbosity == 0:
         log_level = logging.ERROR
+    if verbosity == 2:
+        log_level = logging.DEBUG
 
     logging.basicConfig(
         level=log_level, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -62,6 +65,9 @@ def build_frames_annotations_data(
 ) -> Dict[int, FrameAnnotations]:
     frames = {}
 
+    # Offset for y axis
+    offset = int(round(-IMAGE_HEIGHT * 0.03))
+
     # Sort by player_name and player_track[0]
     sorted_annotations = sorted(
         annotations_data, key=lambda x: (x["player_name"], x["player_track"][0])
@@ -79,7 +85,8 @@ def build_frames_annotations_data(
         player_name = annotation["player_name"]
         frame_number, x, y = annotation["player_track"]
 
-        player_info = PlayerAnnotation(player_name, FramePoint(x, y))
+        fixed_y = y + offset
+        player_info = PlayerAnnotation(player_name, FramePoint(x, fixed_y))
 
         if frame_number in frames:
             frames[frame_number].add_player_annotation(player_info)
@@ -174,10 +181,11 @@ def save_masks_and_images(
 # Initialize the SAM model with mixed precision
 def initialize_sam_model(config: str, checkpoint: str, mixed_precision: bool = True):
     if mixed_precision:
-        logger.info("Enabling mixed precision")
+        logger.debug("Enabling mixed precision")
         enable_mixed_precision()
 
     sam2_model = build_sam2_video_predictor(config, checkpoint)
+    logger.info("SAM model initialized successfully")
 
     return sam2_model
 
@@ -211,7 +219,7 @@ def process_video_frames(sam2_model, frames_annotations_data, images_path, frame
                 dtype=np.float32,
             )
 
-            logger.info(
+            logger.debug(
                 f"Adding point for {player_annotation.player_name} ID {annotation_object_id} at {point} on frame {frame_number}"
             )
 
@@ -229,6 +237,7 @@ def process_video_frames(sam2_model, frames_annotations_data, images_path, frame
 # Propagate the points added in one frame throughout the rest of the video
 def propagate_masks(sam2_model, inference_state):
     video_segments = {}  # video_segments contains the per-frame segmentation results
+    logger.info("Propagating masks throughout the video")
     for out_frame_idx, out_obj_ids, out_mask_logits in sam2_model.propagate_in_video(
         inference_state
     ):
@@ -236,6 +245,7 @@ def propagate_masks(sam2_model, inference_state):
             out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
             for i, out_obj_id in enumerate(out_obj_ids)
         }
+    logger.info("Mask propagation completed")
     return video_segments
 
 
@@ -261,15 +271,15 @@ def main():
         type=str,
         required=False,
         default="layers",
-        help="Path of the ouput masks (./layers)",
+        help="Path of the output masks (./layers)",
     )
     parser.add_argument(
         "-vb",
         "--verbosity",
         type=int,
-        choices=[0, 1],
+        choices=[0, 1, 2],
         default=1,
-        help="Set the logging verbosity: 0=ERROR, 1=INFO (1)",
+        help="Set the logging verbosity: 0=ERROR, 1=INFO, 2=DEBUG (1)",
     )
     args = parser.parse_args()
 
@@ -309,7 +319,6 @@ def main():
     # Initialize the SAM 2 model
     logger.info("Initializing SAM 2 Model")
     sam2_model = initialize_sam_model(CONFIG, CHECKPOINT, mixed_precision=True)
-    logger.info("SAM 2 model initialized successfully")
 
     # Process the video frames and propagate the masks
     inference_state, player_ids = process_video_frames(
@@ -317,13 +326,13 @@ def main():
     )
     logger.info("Starting masklet propagation throughout the video")
     video_segments = propagate_masks(sam2_model, inference_state)
-    logger.info("Masklet propagation completed")
 
     # Save the masks and the original frames
     logger.info(f"Saving all generated masks to output path: {output_path}")
     save_masks_and_images(
         video_segments, images_path, frame_names, player_ids, output_path
     )
+    logger.info("Process completed successfully")
 
 
 if __name__ == "__main__":
