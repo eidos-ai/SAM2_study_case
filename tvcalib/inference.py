@@ -59,12 +59,13 @@ class VideoCalibration:
         self.players_tags = {}
         with open(self.json_tags_path, 'r') as file:
             tags = json.load(file)
-        for player, frames in tags.items():
-            for frame, coords in frames.items():
-                frame_name = f"{int(frame):04d}.jpg"
+        for player in tags:
+            for track in player["player_track"]:
+                frame_name = f"{int(track[0]):04d}.jpg"
                 if frame_name not in self.players_tags:
                     self.players_tags[frame_name] = []
-                self.players_tags[frame_name].append({player: coords})
+                self.players_tags[frame_name].append({player["player_name"]: [track[1], track[2]]})
+        self.players_tags = dict(sorted(self.players_tags.items()))
 
     def pixel_to_world_coords(self, pixel_coords, img_width, img_height):
         x_scale = self.field_height / img_width
