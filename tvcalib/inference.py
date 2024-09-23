@@ -38,6 +38,7 @@ class VideoCalibration:
     def __init__(self, video_path):
         self.video_path = Path(video_path)
         self.images_path = Path("tmp/raw_frames")
+        self.json_tags_path = Path("data/soccernet/players.json")
         self.output_dir = Path("tmp")
         self.checkpoint = "data/segment_localization/train_59.pt"
         self.gpu = True
@@ -55,7 +56,15 @@ class VideoCalibration:
         self.df = None
         self.object3dcpu = None
         self.target_scale = 5
-
+        self.players_tags = {}
+        with open(self.json_tags_path, 'r') as file:
+            tags = json.load(file)
+        for player, frames in tags.items():
+            for frame, coords in frames.items():
+                frame_name = f"{int(frame):04d}.jpg"
+                if frame_name not in self.players_tags:
+                    self.players_tags[frame_name] = []
+                self.players_tags[frame_name].append({player: coords})
 
     def pixel_to_world_coords(self, pixel_coords, img_width, img_height):
         x_scale = self.field_height / img_width
@@ -187,7 +196,7 @@ class VideoCalibration:
         with open(f"{self.output_dir}/metadata.json", 'w') as json_file:
             json.dump(dict_list, json_file, indent=4)
 
-    def get_world_coordinates(self, image_id: str, pixel: list[int]):
+    def get_world_coordinates(self, image_id: str, players_tags): # players_tags: [..., {"player1": [x,y]}, ...]
         image = Image.open(self.images_path / image_id).convert("RGB")
         image = T.functional.to_tensor(image)
         h = torch.tensor(self.df[self.df["image_id"] == image_id]["homography"].values[0])
@@ -223,17 +232,25 @@ class VideoCalibration:
         foreground = Image.fromarray(mask.numpy())
         blended = Image.blend(background, foreground, alpha=0.5)
 
-        pixels_raw_tensor = torch.tensor(pixel, dtype=torch.float32)
-        pixels = pixels_raw_tensor.view(1, 2)
-        points_image = kornia.geometry.conversions.convert_points_to_homogeneous(pixels)
-        points_image = points_image.transpose(0, 1)
-        h_img2img = (S @ T_adjusted @ h).squeeze(0)
-        projected_points = h_img2img @ points_image
-        projected_points = projected_points / (projected_points[-1] + 1e-8)
-        world_coords = self.pixel_to_world_coords(projected_points, blended.size[0], blended.size[1])
-        return world_coords
+        
+        world_coords_list = []
+        for player_tag in players_tags:
+            for player, pixel in player_tag.items():
+                if pixel is None:
+                    world_coords_list.append({player: {"x": None, "y": None}})
+                    continue
+                pixels_raw_tensor = torch.tensor(pixel, dtype=torch.float32)
+                pixels = pixels_raw_tensor.view(1, 2)
+                points_image = kornia.geometry.conversions.convert_points_to_homogeneous(pixels)
+                points_image = points_image.transpose(0, 1)
+                h_img2img = (S @ T_adjusted @ h).squeeze(0)
+                projected_points = h_img2img @ points_image
+                projected_points = projected_points / (projected_points[-1] + 1e-8)
+                world_coords = self.pixel_to_world_coords(projected_points, blended.size[0], blended.size[1])
+                world_coords_list.append({player: {"x": world_coords.x, "y": world_coords.y}})
+        return world_coords_list
 
-    def draw_player_location(self, image_id, world_coords):
+    def draw_player_location(self, image_id, players_world_coords):
         df_row = self.df[self.df["image_id"] == image_id].iloc[0].to_dict()
 
         if "checkpoint" in image_id:
@@ -259,20 +276,24 @@ class VideoCalibration:
         ax.axis('off')
         ax = viz.draw_reprojection(ax, self.object3dcpu, cam)
 
-        theta = np.linspace(0, 2 * np.pi, 300)
-        circle_points = np.array([[world_coords.x + self.radius * np.cos(t), world_coords.y + self.radius * np.sin(t), 0] for t in theta])
-        test_circle = torch.Tensor(circle_points)
-        with torch.no_grad():
-            points_px = cam.project_point2pixel(test_circle, lens_distortion=False).cpu()[0, 0]
-            circle2d = Polygon(
-                points_px[:, :2],
-                closed=True,
-                color="black",
-                fill=False,
-                alpha=0.5,
-                linewidth=5,
-            )
-            ax.add_patch(circle2d)
+        for player_tag in players_world_coords:
+            for player, coords in player_tag.items():
+                if any(value is None for value in coords.values()):
+                    continue
+                theta = np.linspace(0, 2 * np.pi, 300)
+                circle_points = np.array([[coords["x"] + self.radius * np.cos(t), coords["y"] + self.radius * np.sin(t), 0] for t in theta])
+                test_circle = torch.Tensor(circle_points)
+                with torch.no_grad():
+                    points_px = cam.project_point2pixel(test_circle, lens_distortion=False).cpu()[0, 0]
+                    circle2d = Polygon(
+                        points_px[:, :2],
+                        closed=True,
+                        color="black",
+                        fill=False,
+                        alpha=0.5,
+                        linewidth=5,
+                    )
+                    ax.add_patch(circle2d)
 
         ax = viz.draw_selected_points(
             ax,
@@ -315,10 +336,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     video_calibration = VideoCalibration(args.video_path)
-
     video_calibration.extract_frames()
     video_calibration.segment_frames()
     video_calibration.calibrate_camera()
-    coords = video_calibration.get_world_coordinates(image_id="0001.jpg", pixel=[841, 697])
-    video_calibration.draw_player_location(image_id="0001.jpg", world_coords=coords)
+    for frame_id, tags in tqdm(video_calibration.players_tags.items(), desc="Frames iteration", total=len(video_calibration.players_tags)):
+        for player in tags:
+            field_coords = video_calibration.get_world_coordinates(frame_id, tags)
+            video_calibration.draw_player_location(frame_id, field_coords)
     video_calibration.generate_video()
