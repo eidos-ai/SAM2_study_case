@@ -278,7 +278,7 @@ class VideoCalibration:
         ax = viz.draw_reprojection(ax, self.object3dcpu, cam)
 
         for player_tag in players_world_coords:
-            for player, coords in player_tag.items():
+            for coords in player_tag.values():
                 if any(value is None for value in coords.values()):
                     continue
                 theta = np.linspace(0, 2 * np.pi, 300)
@@ -341,7 +341,6 @@ if __name__ == "__main__":
     video_calibration.segment_frames()
     video_calibration.calibrate_camera()
     for frame_id, tags in tqdm(video_calibration.players_tags.items(), desc="Frames iteration", total=len(video_calibration.players_tags)):
-        for player in tags:
-            field_coords = video_calibration.get_world_coordinates(frame_id, tags)
-            video_calibration.draw_player_location(frame_id, field_coords)
+        field_coords = video_calibration.get_world_coordinates(frame_id, tags)
+        video_calibration.draw_player_location(frame_id, field_coords)
     video_calibration.generate_video()
