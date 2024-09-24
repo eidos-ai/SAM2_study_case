@@ -233,7 +233,6 @@ class VideoCalibration:
         foreground = Image.fromarray(mask.numpy())
         blended = Image.blend(background, foreground, alpha=0.5)
 
-        
         world_coords_list = []
         for player_tag in players_tags:
             for player, pixel in player_tag.items():
@@ -281,7 +280,7 @@ class VideoCalibration:
         ax.set_xlim(0, image.shape[2])
         ax.set_ylim(image.shape[1], 0)
         ax.axis('off')
-        ax = viz.draw_reprojection(ax, self.object3dcpu, cam)
+        # ax = viz.draw_reprojection(ax, self.object3dcpu, cam)
 
         for player_tag in players_world_coords:
             for coords in player_tag.values():
@@ -302,28 +301,28 @@ class VideoCalibration:
                     )
                     ax.add_patch(circle2d)
 
-        ax = viz.draw_selected_points(
-            ax,
-            self.object3dcpu,
-            points_line,
-            points_circle,
-            kwargs_outer={
-                "zorder": 1000,
-                "rasterized": False,
-                "s": 500,
-                "alpha": 0.3,
-                "facecolor": "none",
-                "linewidths": 3,
-            },
-            kwargs_inner={
-                "zorder": 1000,
-                "rasterized": False,
-                "s": 50,
-                "marker": ".",
-                "color": "k",
-                "linewidths": 4.0,
-            },
-        )
+        # ax = viz.draw_selected_points(
+        #     ax,
+        #     self.object3dcpu,
+        #     points_line,
+        #     points_circle,
+        #     kwargs_outer={
+        #         "zorder": 1000,
+        #         "rasterized": False,
+        #         "s": 500,
+        #         "alpha": 0.3,
+        #         "facecolor": "none",
+        #         "linewidths": 3,
+        #     },
+        #     kwargs_inner={
+        #         "zorder": 1000,
+        #         "rasterized": False,
+        #         "s": 50,
+        #         "marker": ".",
+        #         "color": "k",
+        #         "linewidths": 4.0,
+        #     },
+        # )
 
         binary_mask = mask > 0
         players_only = np.zeros_like(frame_original_rgb)
@@ -340,7 +339,7 @@ class VideoCalibration:
     def generate_video(self):
         frame_files = sorted((self.output_dir / "frames").glob("*.jpg"))
         frame = cv2.imread(str(frame_files[0]))
-        video = cv2.VideoWriter(str(f"{self.output_dir}/video.mp4"), cv2.VideoWriter_fourcc(*'mp4v'), 25, (self.image_width, self.image_height))
+        video = cv2.VideoWriter(str(f"{self.output_dir}/video_no_lines.mp4"), cv2.VideoWriter_fourcc(*'mp4v'), 25, (self.image_width, self.image_height))
         for frame_file in frame_files:
             frame = cv2.imread(str(frame_file))
             video.write(frame)
