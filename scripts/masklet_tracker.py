@@ -2,7 +2,6 @@ import os
 import numpy as np
 import argparse
 import json
-import logging
 from dataclasses import dataclass, field
 from typing import List, Dict
 from pathlib import Path
@@ -14,25 +13,14 @@ from tqdm import tqdm
 
 from sam2.build_sam import build_sam2_video_predictor
 from utils import extract_video_frames
+from utils import configure_logger
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CHECKPOINT = "../checkpoints/sam2_hiera_large.pt"
 CONFIG = "sam2_hiera_l.yaml"
 IMAGE_HEIGHT = 1920
 
-logger = logging.getLogger(__name__)
-
-
-def configure_logger(verbosity: int) -> None:
-    log_level = logging.INFO  # Default to INFO level
-    if verbosity == 0:
-        log_level = logging.ERROR
-    if verbosity == 2:
-        log_level = logging.DEBUG
-
-    logging.basicConfig(
-        level=log_level, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
+logger = configure_logger(1)
 
 
 # Represents a point with x and y coordinates
@@ -68,26 +56,23 @@ def build_frames_annotations_data(
     # Offset for y axis
     offset = int(round(-IMAGE_HEIGHT * 0.03))
 
-    # Sort by player_name and player_track[0]
-    sorted_annotations = sorted(
-        annotations_data, key=lambda x: (x["player_name"], x["player_track"][0])
-    )
-
-    # Group by player_name and keep the first entry for each player
-    result = []
-    for player_name, group in groupby(
-        sorted_annotations, key=lambda x: x["player_name"]
-    ):
-        result.append(next(group))
-
-    # Create a PlayerAnnotation for each player
-    for annotation in result:
+    # Iterate over each player's annotations
+    for annotation in annotations_data:
         player_name = annotation["player_name"]
-        frame_number, x, y = annotation["player_track"]
+        player_tracks = annotation["player_track"]
 
+        # Sort the player's tracks by the first element (frame number)
+        sorted_tracks = sorted(player_tracks, key=lambda track: track[0])
+
+        # Get the track with the lowest frame number (first in sorted list)
+        frame_number, x, y = sorted_tracks[0]
+        frame_number -= 1
+
+        # Apply the offset to y
         fixed_y = y + offset
         player_info = PlayerAnnotation(player_name, FramePoint(x, fixed_y))
 
+        # Add the player's annotation to the frame
         if frame_number in frames:
             frames[frame_number].add_player_annotation(player_info)
         else:
@@ -143,39 +128,45 @@ def save_masks_and_images(
     video_segments,
     images_path: Path,
     frame_names: List[str],
-    player_ids: Dict[str, int],
     output_path: Path,
 ) -> None:
-    # Create the root folder
+    # Create the root 'layers' folder
     root_folder = output_path
-    root_folder.mkdir(exist_ok=True)
+    root_folder.mkdir(parents=True, exist_ok=True)
+
+    # Create the 'video' and 'players' folders inside 'layers'
+    video_folder = root_folder / "video"
+    players_folder = root_folder / "players"
+    video_folder.mkdir(parents=True, exist_ok=True)
+    players_folder.mkdir(parents=True, exist_ok=True)
 
     # Loop through each frame and its corresponding masks
     for frame_idx in tqdm(video_segments.keys(), desc="Saving masks"):
         frame_masks = video_segments[frame_idx]
 
-        # Create the folder structure for each frame
-        frame_folder = root_folder / str(frame_idx)
-        video_folder = frame_folder / "video"
-        players_folder = frame_folder / "players"
-
-        video_folder.mkdir(parents=True, exist_ok=True)
-        players_folder.mkdir(parents=True, exist_ok=True)
-
-        # Save the original video frame
+        # Save the original video frame to the 'video' folder
+        frame_name = f"{frame_idx + 1:04d}.jpg"  # Frame name with 4-digit padding
         video_frame_path = images_path / frame_names[frame_idx]
-        frame_output_path = video_folder / frame_names[frame_idx]
+        frame_output_path = video_folder / frame_name
 
         original_frame = cv2.imread(str(video_frame_path))
         cv2.imwrite(str(frame_output_path), original_frame)
 
-        # Save each player's mask in the 'players' folder
+        # Combine all player masks into one image
+        combined_mask = None
         for player_id, mask in frame_masks.items():
             mask = np.squeeze(mask)
             mask_image = (mask * 255).astype(np.uint8)
-            mask_filename = f"player_{player_id}.png"
-            mask_output_path = players_folder / mask_filename
-            cv2.imwrite(str(mask_output_path), mask_image)
+
+            if combined_mask is None:
+                combined_mask = mask_image
+            else:
+                combined_mask = np.maximum(combined_mask, mask_image)
+
+        # Save the combined mask image to the 'players' folder
+        mask_output_name = f"{frame_idx + 1:04d}.png"
+        mask_output_path = players_folder / mask_output_name
+        cv2.imwrite(str(mask_output_path), combined_mask)
 
 
 # Initialize the SAM model with mixed precision
@@ -283,7 +274,7 @@ def main():
     )
     args = parser.parse_args()
 
-    configure_logger(args.verbosity)
+    logger = configure_logger(args.verbosity)
 
     video_path = Path(args.video_path)
     annotations_path = Path(args.annotations_path)
@@ -329,9 +320,7 @@ def main():
 
     # Save the masks and the original frames
     logger.info(f"Saving all generated masks to output path: {output_path}")
-    save_masks_and_images(
-        video_segments, images_path, frame_names, player_ids, output_path
-    )
+    save_masks_and_images(video_segments, images_path, frame_names, output_path)
     logger.info("Process completed successfully")
 
 

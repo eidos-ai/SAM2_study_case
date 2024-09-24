@@ -1,6 +1,21 @@
+import logging
 from pathlib import Path
 
 import cv2
+
+
+def configure_logger(verbosity: int):
+    log_level = logging.INFO  # Default to INFO level
+    if verbosity == 0:
+        log_level = logging.ERROR
+    if verbosity == 2:
+        log_level = logging.DEBUG
+
+    logging.basicConfig(
+        level=log_level, format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+    
+    return logging.getLogger(__name__)
 
 # Extract all the frames from video at video_path and
 # stores them in images_path
