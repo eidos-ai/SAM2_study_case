@@ -259,6 +259,12 @@ class VideoCalibration:
 
         image = Image.open(self.images_path / image_id).convert("RGB")
         image = T.functional.to_tensor(image)
+        
+        mask_path = Path(self.output_dir / f"layers/players/{image_id[:-4]}.png")
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        
+        frame_original = cv2.imread(str(self.images_path / image_id))
+        frame_original_rgb = cv2.cvtColor(frame_original, cv2.COLOR_BGR2RGB)
 
         cam = get_camera_from_per_sample_output(df_row, self.lens_dist)
         points_line, points_circle = df_row["points_line"], df_row["points_circle"]
@@ -318,6 +324,16 @@ class VideoCalibration:
                 "linewidths": 4.0,
             },
         )
+
+        binary_mask = mask > 0
+        players_only = np.zeros_like(frame_original_rgb)
+        players_only[binary_mask] = frame_original_rgb[binary_mask]
+        non_zero_mask = np.any(players_only != 0, axis=-1)
+        players_only_rgba = np.zeros((*players_only.shape[:2], 4), dtype=np.uint8)
+        players_only_rgba[..., :3] = players_only
+        players_only_rgba[..., 3] = non_zero_mask.astype(np.uint8) * 255
+
+        ax.imshow(players_only_rgba, zorder=1001)
         plt.savefig(self.output_dir / f"frames/{image_id}", dpi=100, bbox_inches='tight', pad_inches=0)
         plt.close(fig)
 
