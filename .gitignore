@@ -12,3 +12,5 @@ checkpoints/*.pt
 *.mp4
 *.pt
 tvcalib/tmp/
+images
+scripts/images
