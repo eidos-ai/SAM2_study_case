@@ -63,20 +63,28 @@ def build_frames_annotations_data(
 
         # Sort the player's tracks by the first element (frame number)
         sorted_tracks = sorted(player_tracks, key=lambda track: track[0])
+        
+        # The frame where the player was last seen
+        last_frame_number = None
 
-        # Get the track with the lowest frame number (first in sorted list)
-        frame_number, x, y = sorted_tracks[0]
-        frame_number -= 1
+        # Iterate over the sorted tracks to check for gaps
+        for track in sorted_tracks:
+            frame_number, x, y = track
+            frame_number -= 1
 
-        # Apply the offset to y
-        fixed_y = y + offset
-        player_info = PlayerAnnotation(player_name, FramePoint(x, fixed_y))
+            # Check if there is a gap in frames
+            if last_frame_number is None or frame_number > last_frame_number + 1:
+                # Apply the offset to y
+                fixed_y = y + offset
+                player_info = PlayerAnnotation(player_name, FramePoint(x, fixed_y))
 
-        # Add the player's annotation to the frame
-        if frame_number in frames:
-            frames[frame_number].add_player_annotation(player_info)
-        else:
-            frames[frame_number] = FrameAnnotations(frame_number, [player_info])
+                # Add the player's annotation to the frame
+                if frame_number in frames:
+                    frames[frame_number].add_player_annotation(player_info)
+                else:
+                    frames[frame_number] = FrameAnnotations(frame_number, [player_info])
+                    
+            last_frame_number = frame_number
 
     return frames
 

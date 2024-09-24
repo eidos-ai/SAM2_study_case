@@ -5,7 +5,7 @@ import cv2
 
 
 def configure_logger(verbosity: int):
-    log_level = logging.INFO  # Default to INFO level
+    log_level = logging.DEBUG  # Default to INFO level
     if verbosity == 0:
         log_level = logging.ERROR
     if verbosity == 2:
