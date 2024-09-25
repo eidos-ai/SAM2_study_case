@@ -300,7 +300,8 @@ class VideoCalibration:
                         linewidth=5,
                     )
                     ax.add_patch(circle2d)
-
+        
+        # field lines plotting
         # ax = viz.draw_selected_points(
         #     ax,
         #     self.object3dcpu,
