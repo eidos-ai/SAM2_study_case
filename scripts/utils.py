@@ -52,3 +52,17 @@ def extract_video_frames(video_path: str | Path, images_path: str | Path):
     cap.release()
     
     return frames_names
+
+def batch_indexes(total_indices):
+    indexes_list = []
+    list_size = 100
+    indexes_list.append(list(range(0, 50)))
+    start = 50
+
+    while start <= total_indices:
+        end = start + list_size
+        sublist = list(range(start, min(end, total_indices + 1)))
+        indexes_list.append(sublist)
+        start = end - 50
+
+    return indexes_list
