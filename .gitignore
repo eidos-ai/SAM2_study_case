@@ -19,3 +19,4 @@ tvcalib/tmp/
 *.JPEG
 *.PNG
 *.json
+runs/
