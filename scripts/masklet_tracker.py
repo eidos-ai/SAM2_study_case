@@ -15,6 +15,8 @@ from sam2.build_sam import build_sam2_video_predictor
 from utils import extract_video_frames
 from utils import set_up_logger
 
+from PIL import Image, ImageDraw
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CHECKPOINT = "../checkpoints/sam2_hiera_large.pt"
 CONFIG = "sam2_hiera_l.yaml"
@@ -64,7 +66,7 @@ class MaskletTracker:
             annotations_data = json.load(file)
 
         self.logger.info("Building frame annotations")
-        self.frame_annotations = self._get_frame_annotations(annotations_data)
+        self.frame_annotations = self._get_frame_annotations_yolo(annotations_data)
         self.player_ids = self._codify_player_names(self.frame_annotations)
 
         self.logger.info(f"Extracting video frames from: {self.video_path}")
@@ -79,6 +81,7 @@ class MaskletTracker:
     # Masklet tracking
     def track(self):
         self.logger.info("Starting masklet tracking")
+            
         self.inference_state = self._process_video_frames(
             self.sam2_model, self.frame_annotations, self.player_ids, self.frames_path
         )
@@ -96,6 +99,33 @@ class MaskletTracker:
             )
 
         return self.video_segments
+    
+    
+    # Draws the YOLO annotation points
+    def draw_yolo_annotation_points(self):
+        point_radius = 5  # Radius for the annotation points
+        point_color = (255, 0, 0)  # Red color for points
+
+        # Iterate over each frame present in self.frame_annotations
+        for frame_number, frame_annotations in self.frame_annotations.items():
+            # Build the path to the original image
+            image_path = Path(self.frames_path) / self.frames_names[frame_number]
+
+            # Open the image
+            image = Image.open(image_path)
+            draw = ImageDraw.Draw(image)
+
+            # Iterate over all player annotations in this frame and draw points
+            for player_annotation in frame_annotations.players_annotations:
+                x, y = player_annotation.point.x, player_annotation.point.y
+                draw.ellipse((x - point_radius, y - point_radius, x + point_radius, y + point_radius), fill=point_color)
+
+            # Save the image with drawn points
+            output_path = f"frame{frame_number}_ann_points.jpg"
+            image.save(output_path)
+
+            self.logger.info(f"Saved annotated frame {frame_number} to {output_path}")
+
 
     # Builds a Dict with all of the frames' annotations from the raw_annotations JSON object
     def _get_frame_annotations(
@@ -139,6 +169,50 @@ class MaskletTracker:
                     self.logger.debug(f"Added {player_info} for frame {frame_number}")
 
                 last_frame_number = frame_number
+
+        return frames
+    
+    # Builds a Dict with all of the frames' annotations from the raw_annotations YOLO JSON object
+    def _get_frame_annotations_yolo(self, raw_annotations: List[Dict]) -> Dict[int, FrameAnnotations]:
+        frames = {}
+        image_width = 1920  # Replace with actual image width if different
+        image_height = 1080  # Replace with actual image height if different
+
+        player_id = 0
+
+        # Iterate over each frame's annotations
+        for annotation in raw_annotations:
+            image_path = annotation["image_path"]
+            detections = annotation["detections"]
+
+            # Extract frame number from the image path (subtract 1 to start at 0)
+            frame_number = int(image_path.split('/')[-1].replace('.jpg', '')) - 1
+
+            # Iterate over the detections
+            for detection in detections:
+                if detection["class"] != 0:
+                    continue
+
+                bbox = detection["bbox"][0]
+                bbox_cx, bbox_cy = bbox[0], bbox[1]
+
+                # Denormalize center x and center y, then round and cast to int
+                x = int(round(bbox_cx * image_width))
+                y = int(round(bbox_cy * image_height))
+
+                # Create the player annotation with an increasing player name
+                player_info = PlayerAnnotation(str(player_id), FramePoint(x, y))
+
+                # Add the player's annotation to the frame
+                if frame_number in frames:
+                    frames[frame_number].add_player_annotation(player_info)
+                else:
+                    frames[frame_number] = FrameAnnotations(
+                        frame_number, [player_info]
+                    )
+
+                player_id += 1
+                self.logger.debug(f"Added {player_info} for frame {frame_number}")
 
         return frames
 
@@ -346,4 +420,5 @@ if __name__ == "__main__":
         exit(1)
 
     masklet_tracker = MaskletTracker(video_path, annotations_path, output_path, verbose)
+    # masklet_tracker.draw_annotation_points()
     video_segments = masklet_tracker.track()
