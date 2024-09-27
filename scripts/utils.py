@@ -1,7 +1,7 @@
+import cv2
 import logging
 from pathlib import Path
-
-import cv2
+from PIL import Image
 
 
 def set_up_logger(verbosity: int):
@@ -19,8 +19,7 @@ def set_up_logger(verbosity: int):
 
     return logging.getLogger(__name__)
 
-# Extract all the frames from video at video_path and
-# stores them in images_path
+# Extract all the frames from video at video_path and stores them in images_path
 def extract_video_frames(video_path: str | Path, images_path: str | Path):
     video_path = Path(video_path)
     images_path = Path(images_path)
@@ -66,3 +65,15 @@ def batch_indexes(total_indices):
         start = end - 50
 
     return indexes_list
+
+def create_overlap_image(image1_path, image2_path, output_path):
+    mask1 = Image.open(image1_path).convert('L')
+    mask2 = Image.open(image2_path).convert('L')
+
+    overlapped = Image.new('L', mask1.size)
+    for x in range(mask1.width):
+        for y in range(mask1.height):
+            pixel1 = mask1.getpixel((x, y))
+            pixel2 = mask2.getpixel((x, y))
+            overlapped.putpixel((x, y), pixel1 | pixel2)
+    overlapped.save(output_path)
