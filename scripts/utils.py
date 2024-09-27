@@ -52,6 +52,7 @@ def extract_video_frames(video_path: str | Path, images_path: str | Path):
     
     return frames_names
 
+
 def batch_indexes(total_indices):
     indexes_list = []
     list_size = 100
@@ -66,6 +67,26 @@ def batch_indexes(total_indices):
 
     return indexes_list
 
+
+def batch_indexes_v2(total_frames: int, annotation_interval: int):
+    indexes_dict = {}
+    
+    # (start_frame, max_number_frames)
+    indexes_dict[0] = (0, annotation_interval)
+    
+    previous_frame = 0
+    total = annotation_interval
+
+    while total <= total_frames:
+        actual_frame = total - 1
+        max_frame_number = actual_frame + annotation_interval - previous_frame + 1
+        indexes_dict[actual_frame] = (previous_frame, max_frame_number)
+        previous_frame = actual_frame
+        total += annotation_interval
+
+    return indexes_dict
+
+
 def create_overlap_image(image1_path, image2_path, output_path):
     mask1 = Image.open(image1_path).convert('L')
     mask2 = Image.open(image2_path).convert('L')
@@ -77,3 +98,5 @@ def create_overlap_image(image1_path, image2_path, output_path):
             pixel2 = mask2.getpixel((x, y))
             overlapped.putpixel((x, y), pixel1 | pixel2)
     overlapped.save(output_path)
+
+    
