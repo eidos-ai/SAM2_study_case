@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict
 from pathlib import Path
 from itertools import groupby
+from PIL import Image, ImageDraw
 
 import torch
 import cv2
@@ -14,8 +15,10 @@ from tqdm import tqdm
 from sam2.build_sam import build_sam2_video_predictor
 from utils import extract_video_frames
 from utils import set_up_logger
+from utils import batch_indexes_v2
 
-from PIL import Image, ImageDraw
+import psutil
+
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CHECKPOINT = "../checkpoints/sam2_hiera_large.pt"
@@ -81,22 +84,42 @@ class MaskletTracker:
     # Masklet tracking
     def track(self):
         self.logger.info("Starting masklet tracking")
-            
-        self.inference_state = self._process_video_frames(
-            self.sam2_model, self.frame_annotations, self.player_ids, self.frames_path
-        )
-        self.video_segments = self._propagate_masks(
-            self.sam2_model, self.inference_state
-        )
+        
+        self.batch_indexes = batch_indexes_v2(len(self.frames_names), 50)
+        
+        batch_masks = {}
+        
+        process = psutil.Process()
+        
+        for i in [99, 149]:
+        
+            frame_annotations = {i: self.frame_annotations[i]}
+            start_number, max_frames_number = self.batch_indexes[i]
 
-        if self.output_path is not None:
-            self.logger.info(f"Saving masks to: {self.output_path}")
-            self._save_masks_and_images(
-                self.video_segments,
-                self.frames_path,
-                self.frames_names,
-                self.output_path,
+            self.inference_state = self._process_video_frames(
+                self.sam2_model, frame_annotations, self.player_ids, self.frames_path
             )
+
+            self.video_segments = self._propagate_masks(
+                self.sam2_model, self.inference_state, start_number, max_frames_number-1
+            )
+
+            batch_masks = {i: self.video_segments}
+            
+            self.sam2_model.reset_state(self.inference_state)
+            
+            virtual_memory_used_bytes = process.memory_info().vms
+            virtual_memory_used_gb = virtual_memory_used_bytes / (1024 ** 3)
+            print(f"Virtual memory used: {virtual_memory_used_gb} GB")
+
+            if self.output_path is not None:
+                self.logger.info(f"Saving masks to: {self.output_path}")
+                self._save_masks_and_images(
+                    self.video_segments,
+                    self.frames_path,
+                    self.frames_names,
+                    self.output_path,
+                )
 
         return self.video_segments
     
@@ -307,7 +330,7 @@ class MaskletTracker:
         return inference_state
 
     # Propagate the points added in one frame throughout the rest of the video
-    def _propagate_masks(self, sam2_model, inference_state):
+    def _propagate_masks(self, sam2_model, inference_state, start_number, max_frames_number):
         video_segments = (
             {}
         )  # video_segments contains the per-frame segmentation results
@@ -316,7 +339,7 @@ class MaskletTracker:
             out_frame_idx,
             out_obj_ids,
             out_mask_logits,
-        ) in sam2_model.propagate_in_video(inference_state):
+        ) in sam2_model.propagate_in_video(inference_state, start_number, max_frames_number):
             video_segments[out_frame_idx] = {
                 out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
                 for i, out_obj_id in enumerate(out_obj_ids)
