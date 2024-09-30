@@ -15,7 +15,8 @@ from tqdm import tqdm
 from sam2.build_sam import build_sam2_video_predictor
 from utils import extract_video_frames
 from utils import set_up_logger
-from utils import batch_indexes_v2
+from utils import batch_indexes
+from utils import overlap_masks
 
 import psutil
 
@@ -79,60 +80,61 @@ class MaskletTracker:
         self.sam2_model = self._initialize_sam_model(
             CONFIG, CHECKPOINT, mixed_precision=True
         )
+        self.video_segments = dict()
         self.logger.info(f"Model initialized")
 
     # Masklet tracking
     def track(self):
         self.logger.info("Starting masklet tracking")
         
-        self.batch_indexes = batch_indexes_v2(len(self.frames_names), 50)
+        self.logger.info("Initializing inference state")
+        self.inference_state = self.sam2_model.init_state(
+            video_path=str(self.frames_path)
+        )  # init_state doesn't support Path objects
         
-        batch_masks = {}
+        self.batch_indexes = batch_indexes(len(self.frames_names), 50)
         
         process = psutil.Process()
         
-        indices = [99, 149]
-        
-        for i in indices:        
-            frame_annotations = {i: self.frame_annotations[i]}
-            start_number, max_frames_number = self.batch_indexes[i]
+        for idx, (start_number, max_frames_number) in self.batch_indexes.items():        
+            frame_annotations = self.frame_annotations[idx]
 
-            self.inference_state = self._process_video_frames(
-                self.sam2_model, frame_annotations, self.player_ids, self.frames_path
+            self.inference_state = self._add_frame_points(
+                self.sam2_model, self.inference_state, frame_annotations, self.player_ids, self.frames_path
             )
 
-            self.video_segments = self._propagate_masks(
-                self.sam2_model, self.inference_state, start_number, max_frames_number-1
+            video_segments = self._propagate_masks(
+                self.sam2_model, self.inference_state, start_number, max_frames_number
             )
-
-            batch_masks[i] = self.video_segments
             
+            # Iterate through the frames in the current video_segments
+            for frame_idx, obj_masks in video_segments.items():
+                # Get the list of masks for all objects in the current frame
+                current_masks = list(obj_masks.values())
+
+                if frame_idx in self.video_segments:
+                    # Combine existing masks with the current ones using overlap_masks
+                    self.logger.debug(f"Overlapping existing frame {frame_idx}")
+                    combined_mask = overlap_masks([self.video_segments[frame_idx]] + current_masks)
+                    self.video_segments[frame_idx] = combined_mask
+                else:
+                    # If the frame is not yet in self.video_segments, simply store the combined masks
+                    self.logger.debug(f"Overlapping new frame {frame_idx}")
+                    self.video_segments[frame_idx] = overlap_masks(current_masks)
+                    
             self.sam2_model.reset_state(self.inference_state)
             
             virtual_memory_used_bytes = process.memory_info().vms
             virtual_memory_used_gb = virtual_memory_used_bytes / (1024 ** 3)
-            print(f"Virtual memory used: {virtual_memory_used_gb} GB")
-
-        to_overlap_frames = {}
-        for subdict in batch_masks.values():
-            if isinstance(subdict, dict):
-                for subkey, value in subdict.items():
-                    if subkey in to_overlap_frames:
-                        to_overlap_frames[subkey].append(value)
-                    else:
-                        to_overlap_frames[subkey] = [value]
-        for key, values in to_overlap_frames.items():
-            if len(values) > 1:
-                print(f"repeated key {key} | dict1: {values[0].keys()} dict2: {values[1].keys()}\n")
+            self.logger.debug(f"Virtual memory used: {virtual_memory_used_gb} GB")
         
         if self.output_path is not None:
             self.logger.info(f"Saving masks to: {self.output_path}")
             self._save_masks_and_images(
-                batch_masks, # antes era self.video_segments
+                self.video_segments,
                 self.frames_path,
                 self.frames_names,
-                self.output_path,
-                to_overlap_frames
+                self.output_path
             )
 
         return self.video_segments
@@ -297,48 +299,44 @@ class MaskletTracker:
 
         return sam2_model
 
-    # Process and add points for each player in the frame to the SAM model
-    def _process_video_frames(
-        self, sam2_model, frames_annotations_data, player_ids, images_path
+    # Add points for each player in a given frame to the SAM model
+    def _add_frame_points(
+        self, sam2_model, inference_state, frame_annotation, player_ids, images_path
     ):
-        self.logger.info("Initializing inference state")
-        inference_state = sam2_model.init_state(
-            video_path=str(images_path)
-        )  # init_state doesn't support Path objects
-
+        frame_number = frame_annotation.frame_number
+        
         # For label, `1` means positive click and `0` means negative click
         label = np.array([1], np.int32)
 
         self.logger.info("Adding player points to the model")
-        for frame_number, frame_annotation in frames_annotations_data.items():
-            for player_annotation in frame_annotation.players_annotations:
-                annotation_object_id = player_ids.get(
-                    player_annotation.player_name, None
-                )
+        for player_annotation in frame_annotation.players_annotations:
+            annotation_object_id = player_ids.get(
+                player_annotation.player_name, None
+            )
 
-                if annotation_object_id is None:
-                    self.logger.warning(
-                        f"ID not found for player_annotation {player_annotation}"
-                    )
-                    continue
-
-                # Add a point (x, y)
-                point = np.array(
-                    [[player_annotation.point.x, player_annotation.point.y]],
-                    dtype=np.float32,
+            if annotation_object_id is None:
+                self.logger.warning(
+                    f"ID not found for player_annotation {player_annotation}"
                 )
+                continue
 
-                self.logger.debug(
-                    f"Adding point for {player_annotation.player_name} ID {annotation_object_id} at {point} on frame {frame_number}"
-                )
+            # Add a point (x, y)
+            point = np.array(
+                [[player_annotation.point.x, player_annotation.point.y]],
+                dtype=np.float32,
+            )
 
-                _, out_obj_ids, out_mask_logits = sam2_model.add_new_points_or_box(
-                    inference_state=inference_state,
-                    frame_idx=frame_number,
-                    obj_id=annotation_object_id,
-                    points=point,
-                    labels=label,
-                )
+            self.logger.debug(
+                f"Adding point for {player_annotation.player_name} ID {annotation_object_id} at {point} on frame {frame_number}"
+            )
+
+            _, out_obj_ids, out_mask_logits = sam2_model.add_new_points_or_box(
+                inference_state=inference_state,
+                frame_idx=frame_number,
+                obj_id=annotation_object_id,
+                points=point,
+                labels=label,
+            )
 
         return inference_state
 
@@ -367,7 +365,6 @@ class MaskletTracker:
         images_path: Path,
         frame_names: List[str],
         output_path: Path,
-        to_overlap_frames: Dict[int, Any],
     ) -> None:
         # Create the root 'layers' folder
         root_folder = output_path
@@ -380,8 +377,7 @@ class MaskletTracker:
         players_folder.mkdir(parents=True, exist_ok=True)
 
         # Loop through each frame and its corresponding masks
-        for frame_idx in tqdm(video_segments.keys(), desc="Saving masks"):
-            frame_masks = video_segments[frame_idx]
+        for frame_idx, mask in tqdm(video_segments.items(), desc="Saving masks"):
 
             # Save the original video frame to the 'video' folder
             frame_name = f"{frame_idx + 1:04d}.jpg"  # Frame name with 4-digit padding
@@ -391,21 +387,13 @@ class MaskletTracker:
             original_frame = cv2.imread(str(video_frame_path))
             cv2.imwrite(str(frame_output_path), original_frame)
 
-            # Combine all player masks into one image
-            combined_mask = None
-            for player_id, mask in frame_masks.items():
-                mask = np.squeeze(mask)
-                mask_image = (mask * 255).astype(np.uint8)
-
-                if combined_mask is None:
-                    combined_mask = mask_image
-                else:
-                    combined_mask = np.maximum(combined_mask, mask_image)
+            mask = np.squeeze(mask)
+            mask_image = (mask * 255).astype(np.uint8)
 
             # Save the combined mask image to the 'players' folder
             mask_output_name = f"{frame_idx + 1:04d}.png"
             mask_output_path = players_folder / mask_output_name
-            cv2.imwrite(str(mask_output_path), combined_mask)
+            cv2.imwrite(str(mask_output_path), mask_image)
 
 
 if __name__ == "__main__":

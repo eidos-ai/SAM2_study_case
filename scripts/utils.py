@@ -1,5 +1,6 @@
 import cv2
 import logging
+import numpy as np
 from pathlib import Path
 from PIL import Image
 
@@ -53,22 +54,7 @@ def extract_video_frames(video_path: str | Path, images_path: str | Path):
     return frames_names
 
 
-def batch_indexes(total_indices):
-    indexes_list = []
-    list_size = 100
-    indexes_list.append(list(range(0, 50)))
-    start = 50
-
-    while start <= total_indices:
-        end = start + list_size
-        sublist = list(range(start, min(end, total_indices + 1)))
-        indexes_list.append(sublist)
-        start = end - 50
-
-    return indexes_list
-
-
-def batch_indexes_v2(total_frames: int, annotation_interval: int):
+def batch_indexes(total_frames: int, annotation_interval: int):
     indexes_dict = {}
     
     # (start_frame, max_number_frames)
@@ -79,24 +65,27 @@ def batch_indexes_v2(total_frames: int, annotation_interval: int):
 
     while total <= total_frames:
         actual_frame = total - 1
-        max_frame_number = actual_frame + annotation_interval - previous_frame + 1
+        max_frame_number = actual_frame + annotation_interval - previous_frame
         indexes_dict[actual_frame] = (previous_frame, max_frame_number)
         previous_frame = actual_frame
         total += annotation_interval
 
     return indexes_dict
 
-
-def create_overlap_image(image1_path, image2_path, output_path):
-    mask1 = Image.open(image1_path).convert('L')
-    mask2 = Image.open(image2_path).convert('L')
-
-    overlapped = Image.new('L', mask1.size)
-    for x in range(mask1.width):
-        for y in range(mask1.height):
-            pixel1 = mask1.getpixel((x, y))
-            pixel2 = mask2.getpixel((x, y))
-            overlapped.putpixel((x, y), pixel1 | pixel2)
-    overlapped.save(output_path)
-
+# Overlaps a list of np.arrays using logical OR
+def overlap_masks(masks: list):
+    if not masks:
+        raise ValueError("Mask list is empty")
     
+    # Initialize combined_mask with the first mask
+    combined_mask = masks[0]
+
+    # Ensure all masks have the same shape as the first one
+    for mask in masks[1:]:
+        if mask.shape != combined_mask.shape:
+            raise ValueError("All masks must have the same shape to overlap")
+
+        # Apply logical OR entry by entry
+        combined_mask = np.logical_or(combined_mask, mask)
+    
+    return combined_mask
