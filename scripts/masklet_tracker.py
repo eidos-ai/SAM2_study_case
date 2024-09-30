@@ -3,7 +3,7 @@ import numpy as np
 import argparse
 import json
 from dataclasses import dataclass, field
-from typing import List, Dict
+from typing import List, Dict, Any
 from pathlib import Path
 from itertools import groupby
 from PIL import Image, ImageDraw
@@ -91,8 +91,9 @@ class MaskletTracker:
         
         process = psutil.Process()
         
-        for i in [99, 149]:
+        indices = [99, 149]
         
+        for i in indices:        
             frame_annotations = {i: self.frame_annotations[i]}
             start_number, max_frames_number = self.batch_indexes[i]
 
@@ -104,7 +105,7 @@ class MaskletTracker:
                 self.sam2_model, self.inference_state, start_number, max_frames_number-1
             )
 
-            batch_masks = {i: self.video_segments}
+            batch_masks[i] = self.video_segments
             
             self.sam2_model.reset_state(self.inference_state)
             
@@ -112,18 +113,30 @@ class MaskletTracker:
             virtual_memory_used_gb = virtual_memory_used_bytes / (1024 ** 3)
             print(f"Virtual memory used: {virtual_memory_used_gb} GB")
 
-            if self.output_path is not None:
-                self.logger.info(f"Saving masks to: {self.output_path}")
-                self._save_masks_and_images(
-                    self.video_segments,
-                    self.frames_path,
-                    self.frames_names,
-                    self.output_path,
-                )
+        to_overlap_frames = {}
+        for subdict in batch_masks.values():
+            if isinstance(subdict, dict):
+                for subkey, value in subdict.items():
+                    if subkey in to_overlap_frames:
+                        to_overlap_frames[subkey].append(value)
+                    else:
+                        to_overlap_frames[subkey] = [value]
+        for key, values in to_overlap_frames.items():
+            if len(values) > 1:
+                print(f"repeated key {key} | dict1: {values[0].keys()} dict2: {values[1].keys()}\n")
+        
+        if self.output_path is not None:
+            self.logger.info(f"Saving masks to: {self.output_path}")
+            self._save_masks_and_images(
+                batch_masks, # antes era self.video_segments
+                self.frames_path,
+                self.frames_names,
+                self.output_path,
+                to_overlap_frames
+            )
 
         return self.video_segments
-    
-    
+
     # Draws the YOLO annotation points
     def draw_yolo_annotation_points(self):
         point_radius = 5  # Radius for the annotation points
@@ -354,6 +367,7 @@ class MaskletTracker:
         images_path: Path,
         frame_names: List[str],
         output_path: Path,
+        to_overlap_frames: Dict[int, Any],
     ) -> None:
         # Create the root 'layers' folder
         root_folder = output_path
