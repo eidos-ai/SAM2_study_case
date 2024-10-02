@@ -250,92 +250,67 @@ class VideoCalibration:
                 world_coords_list.append({player: {"x": world_coords.x, "y": world_coords.y}})
         return world_coords_list
 
+        
     def draw_player_location(self, image_id, players_world_coords):
         df_row = self.df[self.df["image_id"] == image_id].iloc[0].to_dict()
 
         if "checkpoint" in image_id:
                 return
-
-        image = Image.open(self.images_path / image_id).convert("RGB")
-        image = T.functional.to_tensor(image)
-        
+            
+        image = cv2.imread(self.images_path / image_id)
         mask_path = Path(self.output_dir / f"layers/players/{image_id[:-4]}.png")
-        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        mask = cv2.imread(mask_path)
         
-        frame_original = cv2.imread(str(self.images_path / image_id))
-        frame_original_rgb = cv2.cvtColor(frame_original, cv2.COLOR_BGR2RGB)
-
+        # This mask is applied after drawing the circle marks
+        colored_player_mask = cv2.bitwise_and(image, mask)
+        
         cam = get_camera_from_per_sample_output(df_row, self.lens_dist)
-        points_line, points_circle = df_row["points_line"], df_row["points_circle"]
-
-        if self.lens_dist:
-            image = cam.undistort_images(image.unsqueeze(0).unsqueeze(0)).squeeze()
-            points_line = SNProjectiveCamera.static_undistort_points(points_line.unsqueeze(0).unsqueeze(0), cam).squeeze()
-            points_circle = SNProjectiveCamera.static_undistort_points(points_circle.unsqueeze(0).unsqueeze(0), cam).squeeze()
-        else:
-            psi = None
-
-        fig, ax = viz.init_figure(self.image_width, self.image_height)
-        ax = viz.draw_image(ax, image)
-        ax.set_xlim(0, image.shape[2])
-        ax.set_ylim(image.shape[1], 0)
-        ax.axis('off')
-        # ax = viz.draw_reprojection(ax, self.object3dcpu, cam)
-
+        
+        # if self.lens_dist:
+        #     image = cam.undistort_images(image.unsqueeze(0).unsqueeze(0)).squeeze()
+        #     points_line = SNProjectiveCamera.static_undistort_points(points_line.unsqueeze(0).unsqueeze(0), cam).squeeze()
+        #     points_circle = SNProjectiveCamera.static_undistort_points(points_circle.unsqueeze(0).unsqueeze(0), cam).squeeze()
+        # else:
+        #     psi = None
+        
         for player_tag in players_world_coords:
             for coords in player_tag.values():
                 if any(value is None for value in coords.values()):
                     continue
+                # Approximate a circle with points
                 theta = np.linspace(0, 2 * np.pi, 300)
                 circle_points = np.array([[coords["x"] + self.radius * np.cos(t), coords["y"] + self.radius * np.sin(t), 0] for t in theta])
                 test_circle = torch.Tensor(circle_points)
-                with torch.no_grad():
-                    points_px = cam.project_point2pixel(test_circle, lens_distortion=False).cpu()[0, 0]
-                    circle2d = Polygon(
-                        points_px[:, :2],
-                        closed=True,
-                        color="black",
-                        fill=False,
-                        alpha=0.5,
-                        linewidth=5,
-                    )
-                    ax.add_patch(circle2d)
+                
+                # Draw the cirlce in the image
+                points_px = cam.project_point2pixel(test_circle, lens_distortion=False).cpu()[0, 0].numpy().astype(int)
+                image = self.draw_player_mark(image, points_px)
+                
+        # Apply player layer on top
+        image[colored_player_mask > 0] = colored_player_mask[colored_player_mask > 0]
         
-        # field lines plotting
-        # ax = viz.draw_selected_points(
-        #     ax,
-        #     self.object3dcpu,
-        #     points_line,
-        #     points_circle,
-        #     kwargs_outer={
-        #         "zorder": 1000,
-        #         "rasterized": False,
-        #         "s": 500,
-        #         "alpha": 0.3,
-        #         "facecolor": "none",
-        #         "linewidths": 3,
-        #     },
-        #     kwargs_inner={
-        #         "zorder": 1000,
-        #         "rasterized": False,
-        #         "s": 50,
-        #         "marker": ".",
-        #         "color": "k",
-        #         "linewidths": 4.0,
-        #     },
-        # )
+        cv2.imwrite(self.output_dir / f"frames/{image_id}", image)
+                
+                
+    def draw_player_mark(self, image, projected_points, color=(0, 0, 0), thickness=5, alpha=0.5):
+        # Create a copy of the image to draw on
+        overlay = image.copy()
 
-        binary_mask = mask > 0
-        players_only = np.zeros_like(frame_original_rgb)
-        players_only[binary_mask] = frame_original_rgb[binary_mask]
-        non_zero_mask = np.any(players_only != 0, axis=-1)
-        players_only_rgba = np.zeros((*players_only.shape[:2], 4), dtype=np.uint8)
-        players_only_rgba[..., :3] = players_only
-        players_only_rgba[..., 3] = non_zero_mask.astype(np.uint8) * 255
+        # Draw the circle on the overlay
+        cv2.polylines(
+            overlay, 
+            [projected_points],
+            isClosed=True,
+            color=color,
+            thickness=thickness,
+            lineType=cv2.LINE_AA
+        )
 
-        ax.imshow(players_only_rgba, zorder=1001)
-        plt.savefig(self.output_dir / f"frames/{image_id}", dpi=100, bbox_inches='tight', pad_inches=0)
-        plt.close(fig)
+        # Blend the overlay with the original image using the alpha value
+        cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0, image)
+
+        return image
+        
 
     def generate_video(self):
         frame_files = sorted((self.output_dir / "frames").glob("*.jpg"))
