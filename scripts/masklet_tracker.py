@@ -7,6 +7,7 @@ from typing import List, Dict, Any
 from pathlib import Path
 from itertools import groupby
 from PIL import Image, ImageDraw
+import psutil
 
 import torch
 import cv2
@@ -18,13 +19,10 @@ from utils import set_up_logger
 from utils import batch_indexes
 from utils import overlap_masks
 
-import psutil
-
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CHECKPOINT = "../checkpoints/sam2_hiera_large.pt"
 CONFIG = "sam2_hiera_l.yaml"
-IMAGE_HEIGHT = 1920
 
 
 # Represents a point with x and y coordinates
@@ -57,6 +55,7 @@ class MaskletTracker:
         video_path: str | Path,
         annotations_path: str | Path,
         output_path: str | Path | None = None,
+        batch_number: int = 10,
         verbose: int = 0,
     ):
         self.logger = set_up_logger(verbose)
@@ -64,18 +63,23 @@ class MaskletTracker:
         self.annotations_path = Path(annotations_path)
         self.frames_path = Path("tmp")
         self.output_path = Path(output_path) if output_path else None
+        self.batch_number = batch_number
 
         # Read and parse the JSON file
         with open(annotations_path, "r") as file:
             annotations_data = json.load(file)
 
+        self.logger.info(f"Extracting video frames from: {self.video_path}")
+        self.frames_names, self.frame_width, self.frame_height = extract_video_frames(
+            self.video_path, self.frames_path
+        )
+        self.logger.info(f"Extraced {len(self.frames_names)} frames")
+
         self.logger.info("Building frame annotations")
         self.frame_annotations = self._get_frame_annotations_yolo(annotations_data)
         self.player_ids = self._codify_player_names(self.frame_annotations)
+        self.batch_indexes = batch_indexes(list(self.frame_annotations.keys()))
 
-        self.logger.info(f"Extracting video frames from: {self.video_path}")
-        self.frames_names = extract_video_frames(self.video_path, self.frames_path)
-        self.logger.info(f"Extraced {len(self.frames_names)} frames")
         self.logger.info(f"Initializing SAM 2 Model")
         self.sam2_model = self._initialize_sam_model(
             CONFIG, CHECKPOINT, mixed_precision=True
@@ -86,27 +90,29 @@ class MaskletTracker:
     # Masklet tracking
     def track(self):
         self.logger.info("Starting masklet tracking")
-        
+
         self.logger.info("Initializing inference state")
         self.inference_state = self.sam2_model.init_state(
             video_path=str(self.frames_path)
         )  # init_state doesn't support Path objects
-        
-        self.batch_indexes = batch_indexes(len(self.frames_names), 50)
-        
+
         process = psutil.Process()
-        
-        for idx, (start_number, max_frames_number) in self.batch_indexes.items():        
+
+        for idx, (start_number, max_frames_number) in self.batch_indexes.items():
             frame_annotations = self.frame_annotations[idx]
 
             self.inference_state = self._add_frame_points(
-                self.sam2_model, self.inference_state, frame_annotations, self.player_ids, self.frames_path
+                self.sam2_model,
+                self.inference_state,
+                frame_annotations,
+                self.player_ids,
+                self.frames_path,
             )
 
             video_segments = self._propagate_masks(
                 self.sam2_model, self.inference_state, start_number, max_frames_number
             )
-            
+
             # Iterate through the frames in the current video_segments
             for frame_idx, obj_masks in video_segments.items():
                 # Get the list of masks for all objects in the current frame
@@ -115,26 +121,28 @@ class MaskletTracker:
                 if frame_idx in self.video_segments:
                     # Combine existing masks with the current ones using overlap_masks
                     self.logger.debug(f"Overlapping existing frame {frame_idx}")
-                    combined_mask = overlap_masks([self.video_segments[frame_idx]] + current_masks)
+                    combined_mask = overlap_masks(
+                        [self.video_segments[frame_idx]] + current_masks
+                    )
                     self.video_segments[frame_idx] = combined_mask
                 else:
                     # If the frame is not yet in self.video_segments, simply store the combined masks
                     self.logger.debug(f"Overlapping new frame {frame_idx}")
                     self.video_segments[frame_idx] = overlap_masks(current_masks)
-                    
+
             self.sam2_model.reset_state(self.inference_state)
-            
+
             virtual_memory_used_bytes = process.memory_info().vms
-            virtual_memory_used_gb = virtual_memory_used_bytes / (1024 ** 3)
+            virtual_memory_used_gb = virtual_memory_used_bytes / (1024**3)
             self.logger.debug(f"Virtual memory used: {virtual_memory_used_gb} GB")
-        
+
         if self.output_path is not None:
             self.logger.info(f"Saving masks to: {self.output_path}")
             self._save_masks_and_images(
                 self.video_segments,
                 self.frames_path,
                 self.frames_names,
-                self.output_path
+                self.output_path,
             )
 
         return self.video_segments
@@ -156,7 +164,15 @@ class MaskletTracker:
             # Iterate over all player annotations in this frame and draw points
             for player_annotation in frame_annotations.players_annotations:
                 x, y = player_annotation.point.x, player_annotation.point.y
-                draw.ellipse((x - point_radius, y - point_radius, x + point_radius, y + point_radius), fill=point_color)
+                draw.ellipse(
+                    (
+                        x - point_radius,
+                        y - point_radius,
+                        x + point_radius,
+                        y + point_radius,
+                    ),
+                    fill=point_color,
+                )
 
             # Save the image with drawn points
             output_path = f"frame{frame_number}_ann_points.jpg"
@@ -164,57 +180,15 @@ class MaskletTracker:
 
             self.logger.info(f"Saved annotated frame {frame_number} to {output_path}")
 
-
-    # Builds a Dict with all of the frames' annotations from the raw_annotations JSON object
-    def _get_frame_annotations(
+    # Builds a Dict with all of the frames' annotations from the raw_annotations YOLO JSON object
+    def _get_frame_annotations_yolo(
         self, raw_annotations: List[Dict]
     ) -> Dict[int, FrameAnnotations]:
         frames = {}
-
-        # Offset for y axis
-        offset = int(round(-IMAGE_HEIGHT * 0.03))
-
-        # Iterate over each player's annotations
-        for annotation in raw_annotations:
-            player_name = annotation["player_name"]
-            player_tracks = annotation["player_track"]
-
-            # Sort the player's tracks by the first element (frame number)
-            sorted_tracks = sorted(player_tracks, key=lambda track: track[0])
-
-            # The frame where the player was last seen
-            last_frame_number = None
-
-            # Iterate over the sorted tracks to check for gaps
-            for track in sorted_tracks:
-                frame_number, x, y = track
-                frame_number -= 1
-
-                # Check if there is a gap in frames
-                if last_frame_number is None or frame_number > last_frame_number + 1:
-                    # Apply the offset to y
-                    fixed_y = y + offset
-                    player_info = PlayerAnnotation(player_name, FramePoint(x, fixed_y))
-
-                    # Add the player's annotation to the frame
-                    if frame_number in frames:
-                        frames[frame_number].add_player_annotation(player_info)
-                    else:
-                        frames[frame_number] = FrameAnnotations(
-                            frame_number, [player_info]
-                        )
-
-                    self.logger.debug(f"Added {player_info} for frame {frame_number}")
-
-                last_frame_number = frame_number
-
-        return frames
-    
-    # Builds a Dict with all of the frames' annotations from the raw_annotations YOLO JSON object
-    def _get_frame_annotations_yolo(self, raw_annotations: List[Dict]) -> Dict[int, FrameAnnotations]:
-        frames = {}
-        image_width = 1920  # Replace with actual image width if different
-        image_height = 1080  # Replace with actual image height if different
+        # Only build annotations for these frames
+        frame_points = np.linspace(
+            1, len(self.frames_names), self.batch_number, dtype=int
+        )
 
         player_id = 0
 
@@ -224,7 +198,10 @@ class MaskletTracker:
             detections = annotation["detections"]
 
             # Extract frame number from the image path (subtract 1 to start at 0)
-            frame_number = int(image_path.split('/')[-1].replace('.jpg', '')) - 1
+            frame_number = int(image_path.split("/")[-1].replace(".jpg", "")) - 1
+
+            if (frame_number + 1) not in frame_points:
+                continue
 
             # Iterate over the detections
             for detection in detections:
@@ -235,8 +212,8 @@ class MaskletTracker:
                 bbox_cx, bbox_cy = bbox[0], bbox[1]
 
                 # Denormalize center x and center y, then round and cast to int
-                x = int(round(bbox_cx * image_width))
-                y = int(round(bbox_cy * image_height))
+                x = int(round(bbox_cx * self.frame_width))
+                y = int(round(bbox_cy * self.frame_height))
 
                 # Create the player annotation with an increasing player name
                 player_info = PlayerAnnotation(str(player_id), FramePoint(x, y))
@@ -245,9 +222,7 @@ class MaskletTracker:
                 if frame_number in frames:
                     frames[frame_number].add_player_annotation(player_info)
                 else:
-                    frames[frame_number] = FrameAnnotations(
-                        frame_number, [player_info]
-                    )
+                    frames[frame_number] = FrameAnnotations(frame_number, [player_info])
 
                 player_id += 1
                 self.logger.debug(f"Added {player_info} for frame {frame_number}")
@@ -304,15 +279,13 @@ class MaskletTracker:
         self, sam2_model, inference_state, frame_annotation, player_ids, images_path
     ):
         frame_number = frame_annotation.frame_number
-        
+
         # For label, `1` means positive click and `0` means negative click
         label = np.array([1], np.int32)
 
         self.logger.info("Adding player points to the model")
         for player_annotation in frame_annotation.players_annotations:
-            annotation_object_id = player_ids.get(
-                player_annotation.player_name, None
-            )
+            annotation_object_id = player_ids.get(player_annotation.player_name, None)
 
             if annotation_object_id is None:
                 self.logger.warning(
@@ -341,7 +314,9 @@ class MaskletTracker:
         return inference_state
 
     # Propagate the points added in one frame throughout the rest of the video
-    def _propagate_masks(self, sam2_model, inference_state, start_number, max_frames_number):
+    def _propagate_masks(
+        self, sam2_model, inference_state, start_number, max_frames_number
+    ):
         video_segments = (
             {}
         )  # video_segments contains the per-frame segmentation results
@@ -350,7 +325,9 @@ class MaskletTracker:
             out_frame_idx,
             out_obj_ids,
             out_mask_logits,
-        ) in sam2_model.propagate_in_video(inference_state, start_number, max_frames_number):
+        ) in sam2_model.propagate_in_video(
+            inference_state, start_number, max_frames_number
+        ):
             video_segments[out_frame_idx] = {
                 out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
                 for i, out_obj_id in enumerate(out_obj_ids)
@@ -421,6 +398,14 @@ if __name__ == "__main__":
         help="Path of the output masks (./layers)",
     )
     parser.add_argument(
+        "-n",
+        "--batch_number",
+        type=int,
+        required=False,
+        default=10,
+        help="Number of batches to do inference over",
+    )
+    parser.add_argument(
         "-vb",
         "--verbosity",
         type=int,
@@ -433,6 +418,7 @@ if __name__ == "__main__":
     video_path = Path(args.video_path)
     annotations_path = Path(args.annotations_path)
     output_path = Path(args.output_path)
+    batch_number = args.batch_number
     verbose = args.verbosity
 
     # Path validations
@@ -444,6 +430,8 @@ if __name__ == "__main__":
         logger.error(f"Error: The JSON file {annotations_path} does not exist.")
         exit(1)
 
-    masklet_tracker = MaskletTracker(video_path, annotations_path, output_path, verbose)
-    # masklet_tracker.draw_annotation_points()
+    masklet_tracker = MaskletTracker(
+        video_path, annotations_path, output_path, batch_number, verbose=verbose
+    )
+    # masklet_tracker.draw_yolo_annotation_points()
     video_segments = masklet_tracker.track()
